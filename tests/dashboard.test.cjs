@@ -7,13 +7,31 @@ const path = require('node:path')
 // Execute the shipped dashboard, with DOM and transport adapters only. The
 // action handlers, catalog refresh and rendering are the production functions.
 function dashboard(fetch) {
+  // Minimal DOM: enough for the log to evict real children, so the page-side
+  // cap is exercised instead of only the arithmetic behind it.
   function element() {
-    return { children: [], value: '', textContent: '', className: '', style: {},
+    return { children: [], value: '', textContent: '', className: '', style: {}, parent: null,
       classList: { add() {}, remove() {}, toggle() {} },
-      setAttribute() {}, addEventListener() {}, focus() {}, remove() {},
-      appendChild(x) { this.children.push(x) },
-      querySelector() { return element() },
-      set innerHTML(value) { this.children = []; this.html = value },
+      setAttribute() {}, addEventListener() {}, focus() {},
+      remove() {
+        if (!this.parent) return
+        const i = this.parent.children.indexOf(this)
+        if (i >= 0) this.parent.children.splice(i, 1)
+        this.parent = null
+      },
+      appendChild(x) { x.parent = this; this.children.push(x) },
+      // Class lookup over real children, so the log placeholder path is
+      // exercised; anything else falls back to a detached element as before.
+      querySelector(sel) {
+        if (typeof sel === 'string' && sel.startsWith('.')) {
+          const cls = sel.slice(1)
+          return this.children.find(c => String(c.className).split(' ').includes(cls)) || element()
+        }
+        return element()
+      },
+      get childElementCount() { return this.children.length },
+      get firstElementChild() { return this.children[0] || null },
+      set innerHTML(value) { this.children = []; this.html = value; this.writes = (this.writes || 0) + 1 },
       get innerHTML() { return this.html || '' }
     }
   }
@@ -275,4 +293,72 @@ test('Fresh tool proof recovers a model after historical failures once consecuti
   assert.equal(d.run('getFilteredModels().map(m => m.id).join()'), 'vendor/recovered')
   d.run('renderModelList()')
   assert.equal(d.nodes.get('modelList').children[0].children.some(child => child.textContent === 'failing'), false)
+})
+
+test('The activity log holds at most the server ring-buffer size', () => {
+  const d = dashboard(async () => reply({}))
+  for (let i = 0; i < 700; i++) d.run(`appendLog('info', 'event ${i}', 1)`)
+  const area = d.nodes.get('logArea')
+  assert.equal(area.children.length, 500)
+  assert.equal(String(d.nodes.get('logCount').textContent), '500')
+  // The newest event survives and the oldest 200 were evicted, in order.
+  assert.equal(area.children.at(-1).children[1].textContent, 'event 699')
+  assert.equal(area.children[0].children[1].textContent, 'event 200')
+  d.run('appendLog("info", "event 700", 1)')
+  assert.equal(area.children.length, 500)
+  assert.equal(area.children.at(-1).children[1].textContent, 'event 700')
+  assert.equal(d.run('logNodesToDrop(500)'), 0)
+  assert.equal(d.run('logNodesToDrop(501)'), 1)
+})
+
+test('Long log messages are capped so one event cannot dominate a row', () => {
+  const d = dashboard(async () => reply({}))
+  d.run(`appendLog('info', ${JSON.stringify('x'.repeat(2000))}, 1)`)
+  const row = d.nodes.get('logArea').children.at(-1)
+  assert.equal(row.children[1].textContent.length, 801)
+  assert.match(row.children[1].textContent, /…$/)
+})
+
+test('Unchanged key statistics skip the 2 s rebuild, changed statistics render', async () => {
+  const stats = {active_index: 0, key_stats: {0: {cooldown: 0, rpm: 3, requests: 4, success: 4, failed: 0, last_used: 1000, is_valid: true, in_flight: 0, consecutive_failures: 0}}}
+  const d = dashboard(async url => url === '/api/keys/stats' ? reply(stats) : reply({}))
+  d.run("keys = ['nvapi-aaaa']; keyFilter = 'all'")
+  await d.run('renderKeys(' + JSON.stringify(stats) + ')')
+  const list = d.nodes.get('keysList')
+  const writes = list.writes
+  await d.run('pollKeyStats()')
+  assert.equal(list.writes, writes, 'a poll with identical data must not rebuild the panel')
+  stats.key_stats[0].requests = 5
+  stats.key_stats[0].success = 5
+  await d.run('pollKeyStats()')
+  assert.equal(list.writes, writes + 1, 'a visible change must rebuild the panel')
+})
+
+test('The key signature changes when the relative-time label changes', () => {
+  const d = dashboard(async () => reply({}))
+  d.run("keys = ['nvapi-aaaa']")
+  const stats = at => JSON.stringify({active_index: 0, key_stats: {0: {cooldown: 0, requests: 1, success: 1, last_used: at, is_valid: true, in_flight: 0, consecutive_failures: 0}}})
+  const now = Math.floor(Date.now() / 1000)
+  assert.equal(d.run(`statsSignature(${stats(now - 5)})`), d.run(`statsSignature(${stats(now - 5)})`))
+  // 5 s and 55 s are both inside the seconds bucket: the label reads 5s and 55s,
+  // so the signature must still differ when the second count differs.
+  assert.notEqual(d.run(`statsSignature(${stats(now - 5)})`), d.run(`statsSignature(${stats(now - 55)})`))
+  // 2 min and 2 min 50 s share the minute bucket and must not trigger a redraw.
+  assert.equal(d.run(`statsSignature(${stats(now - 120)})`), d.run(`statsSignature(${stats(now - 170)})`))
+})
+
+test('The cleared placeholder is replaced by the first event and never counted', () => {
+  const d = dashboard(async () => reply({}))
+  d.run("$('logArea')")
+  const area = d.nodes.get('logArea')
+  // The Clear action leaves this node in the area before any new event.
+  d.run("(() => { const p = document.createElement('div'); p.className = 'log-empty'; $('logArea').appendChild(p) })()")
+  assert.equal(area.children.length, 1)
+  d.run("appendLog('info', 'first event after clear', 1)")
+  assert.equal(area.children.length, 1)
+  assert.equal(area.children[0].children[1].textContent, 'first event after clear')
+  // The placeholder must not consume one of the 500 slots.
+  for (let i = 0; i < 600; i++) d.run(`appendLog('info', 'bulk ${i}', 1)`)
+  assert.equal(area.children.length, 500)
+  assert.equal(area.children.at(-1).children[1].textContent, 'bulk 599')
 })

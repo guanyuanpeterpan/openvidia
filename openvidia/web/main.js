@@ -7,6 +7,19 @@ let _logEntries = 0
 let modelFilter = 'tested'
 let keyFilter = 'active'
 let _lastKeyStats = null
+let _lastStatsSig = null
+
+/* The activity log is the dashboard's only unbounded DOM. The server ring
+   buffer stops at 500 entries (proxy_state.log_events); the page must stop
+   at the same point, or every message of a long session stays a live node. */
+const MAX_LOG_ENTRIES = 500
+const MAX_LOG_MESSAGE_CHARS = 800
+
+/* Oldest nodes to evict so the log holds at most MAX_LOG_ENTRIES entries.
+   Split out as a pure function so the arithmetic is testable without a DOM. */
+function logNodesToDrop(nodeCount) {
+  return nodeCount > MAX_LOG_ENTRIES ? nodeCount - MAX_LOG_ENTRIES : 0
+}
 
 // Catalog and health come from the proxy. Never bake model ids into this UI.
 let catalogLoaded = false
@@ -569,6 +582,43 @@ function keyStatus(k, i, stats) {
   return 'idle'
 }
 
+/* Relative-time bucket used by the signature below. Seconds tick while a key
+   was used under a minute ago; beyond that the label changes by minute/hour. */
+function ageBucket(ts, now) {
+  const s = Math.floor(now - ts)
+  if (s < 60) return 's' + s
+  if (s < 3600) return 'm' + Math.floor(s / 60)
+  return 'h' + Math.floor(s / 3600)
+}
+
+/* Signature of everything renderKeys displays. pollKeyStats compares it and
+   skips the 2 s rebuild when nothing visible changed — the old code tore down
+   and rebuilt every key row (inline SVGs included) forever, even when idle. */
+function statsSignature(data) {
+  if (!data) return ''
+  const sm = data.key_stats || {}
+  const now = Math.floor(Date.now() / 1000)
+  const parts = [keyFilter, data.active_index]
+  keys.forEach((k, i) => {
+    const s = sm[String(i)] || {}
+    parts.push(
+      i,
+      k,
+      keyStatus(k, i, sm),
+      Math.ceil(s.cooldown || 0),
+      s.requests || 0,
+      s.success || 0,
+      s.failed || 0,
+      s.last_used > 0 ? ageBucket(s.last_used, now) : '',
+      s.cooldown_reason || '',
+      s.last_error || ''
+    )
+  })
+  // JSON, not join('|'): mask_key passes short keys through unmasked, and
+  // server-provided tooltip text can contain the separator.
+  return JSON.stringify(parts)
+}
+
 function updateFilterCounts(stats) {
   if (!stats) return
   const sm = stats.key_stats || {}
@@ -589,6 +639,7 @@ function updateFilterCounts(stats) {
 
 function renderKeys(data) {
   _lastKeyStats = data
+  _lastStatsSig = data ? statsSignature(data) : null
   const list = $('keysList')
   list.innerHTML = ''
   $('keyCount').textContent = String(keys.length)
@@ -629,6 +680,9 @@ function renderKeys(data) {
 async function pollKeyStats() {
   try {
     const data = await api('GET', '/api/keys/stats')
+    if (!data) return
+    _lastKeyStats = data
+    if (statsSignature(data) === _lastStatsSig) return
     renderKeys(data)
   } catch (_) {}
 }
@@ -672,13 +726,19 @@ function appendLog(level, msg, timestamp) {
   const el = document.createElement('div')
   el.className = `log-entry ${level}`
   const time = document.createElement('span'); time.className = 'log-time'; time.textContent = t; time.title = knownTime ? occurred.toISOString() : 'Event timestamp unavailable'
-  const text = document.createElement('span'); text.className = 'log-msg'; text.textContent = msg
+  const text = document.createElement('span'); text.className = 'log-msg'
+  text.textContent = msg.length > MAX_LOG_MESSAGE_CHARS ? msg.slice(0, MAX_LOG_MESSAGE_CHARS) + '…' : msg
   el.appendChild(time); el.appendChild(text)
-  const e = $('logArea').querySelector('.log-empty')
+  const area = $('logArea')
+  const e = area.querySelector('.log-empty')
   if (e) e.remove()
-  $('logArea').appendChild(el)
-  $('logArea').scrollTop = $('logArea').scrollHeight
-  _logEntries++; $('logCount').textContent = _logEntries
+  area.appendChild(el)
+  // Evict oldest-first so the node count matches the server-side cap. Without
+  // this, replayed history on every SSE reconnect accumulates forever.
+  for (let n = logNodesToDrop(area.childElementCount); n > 0; n--) area.firstElementChild.remove()
+  area.scrollTop = area.scrollHeight
+  _logEntries = area.childElementCount
+  $('logCount').textContent = _logEntries
   $('logDot').className = 'log-dot active'
   clearTimeout($('logDot')._timer)
   $('logDot')._timer = setTimeout(() => { $('logDot').className = 'log-dot' }, 2000)

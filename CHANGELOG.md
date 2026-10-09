@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep metadata probes from clearing inference cooldowns, including failures arriving during a probe.
 - Reject malformed validation responses and prevent fallback models from receiving another model’s validation evidence.
 - Preserve log occurrence times when replaying activity history, and distinguish metadata reachability from inference availability.
+- Cap the dashboard activity log at the server ring-buffer size, truncate overlong messages, and skip the 2 s key-panel rebuild when nothing visible changed.
 - Bound background compaction jobs, cancel owned jobs on shutdown, and consume late Python 3.14 task failures.
 - Toggle dashboard visibility from the tray icon, add an explicit Hide action, and restore minimized windows correctly.
 - Keep the catalog and healthy models reachable after a model-specific 504; retry configured endpoints when all are temporarily blacklisted.

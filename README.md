@@ -452,12 +452,15 @@ Native window via [pywebview](https://pywebview.flowrl.com/). Opens at **310×57
 
 | Backend | Platform | Engine |
 |---------|----------|--------|
-| **Qt WebEngine** | Linux (KDE/Wayland) | PyQt6-WebEngine (native, best experience) |
-| **GTK WebKit** | Linux (GNOME/X11) | PyGObject + WebKitGTK |
+| **Qt WebEngine** | Linux | PyQt6-WebEngine (native, forced: the tray needs Qt) |
 | **WebKit** | macOS | system WebKit (no extra deps) |
 | **EdgeChromium** | Windows | WebView2 (pre-installed on Win 10/11) |
 
-pywebview auto-detects the best available backend.
+On Linux the app forces the Qt backend, because the tray icon needs the Qt
+event loop. Without that, pywebview can pick GTK: no tray appears, closing the
+window hides it with nothing left to bring it back, and on some Wayland
+desktops GTK exits with `Error 71 (Protocol error) dispatching to Wayland
+display`. macOS and Windows keep their native engines.
 
 ### Linux desktop integration
 

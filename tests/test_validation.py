@@ -96,3 +96,38 @@ def test_backup_does_not_match_unrelated_files(tmp_path):
 
     assert len(backups_of(f)) == 1
     assert (tmp_path / "other_backup_20260101_000000_000000.txt").exists()
+
+
+def test_rotation_orders_by_creation_even_when_mtimes_run_backwards(tmp_path):
+    """copy2 preserves the source mtime, so backup mtimes follow the source
+    file, not the backup. Rotating on mtime therefore kept an arbitrary set.
+    Here the oldest backup carries the newest mtime: mtime order and creation
+    order disagree, and creation order must win."""
+    f = tmp_path / "test.txt"
+    contents = []
+    created = []
+    for i in range(7):
+        f.write_text(f"content {i}")
+        contents.append(f"content {i}")
+        created.append(create_backup(f, max_backups=99))
+
+    # Newest mtime on the oldest backup: 7, 6, 5 ... in creation order.
+    stamps = list(range(1_000_000, 1_000_000 + 70, 10))
+    for backup, mtime in zip(created, reversed(stamps), strict=True):
+        os.utime(backup, (mtime, mtime))
+    cleanup_old_backups(f, max_backups=5)
+
+    kept = {p.read_text() for p in backups_of(f)}
+    assert kept == set(contents[-5:]), "rotation must follow creation order"
+
+
+def test_new_backup_sorts_after_the_previous_one_with_a_frozen_clock(tmp_path):
+    """No sleeps: a frozen mtime must not make two backups compare equal."""
+    f = tmp_path / "test.txt"
+    first_content = "v0"
+    for _ in range(2):
+        create_backup(f, max_backups=5)
+        f.write_text(first_content)
+
+    names = [p.name for p in backups_of(f)]
+    assert names == sorted(names)

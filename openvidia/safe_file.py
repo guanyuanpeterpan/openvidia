@@ -75,8 +75,17 @@ def cleanup_old_backups(
         if f.is_file() and f.name.startswith(prefix) and f.name.endswith(suffix):
             backups.append(f)
 
-    # Sort by modification time (newest first)
-    backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    # Sort by the timestamp in the backup name, newest first. mtime is the
+    # wrong key: create_backup uses copy2, which preserves the *source* file's
+    # modification time, so every backup of a file rewritten within one
+    # filesystem tick carries the same mtime and the order becomes arbitrary.
+    # The name embeds the creation time with microseconds and a fixed width,
+    # so it sorts chronologically. Names are unique per backup, which makes
+    # the stamp a total order.
+    def sort_key(path: Path) -> str:
+        return path.name[len(prefix) : len(path.name) - len(suffix) if suffix else None]
+
+    backups.sort(key=sort_key, reverse=True)
 
     # Remove old backups
     removed = 0
